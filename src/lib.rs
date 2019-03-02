@@ -4,10 +4,7 @@
 
 //! Implementation of a Kalman filter with all statistical bells and whistles exposed.
 
-use std::marker::PhantomData;
-
 use nalgebra::{
-    self as na,
     VectorN,
     MatrixN,
     Scalar,
@@ -15,20 +12,17 @@ use nalgebra::{
     DimName,
     DefaultAllocator,
     allocator::Allocator,
+    Real,
 };
 
-use alga::{
-    linear::Matrix,
-    general::Ring,
-};
-
+#[cfg(feature = "serde")]
 use serde::{Serialize, Deserialize};
 
 ///
-//#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+// note: serde broken -- #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "compact", repr(packed))]
 #[derive(Clone, Debug)]
-pub struct Kalman<T: Scalar + Ring, D: Dim + DimName, P>
+pub struct Kalman<T: Scalar, D: Dim + DimName>
     where DefaultAllocator: Allocator<T, D, D> + Allocator<T, D>
 {
     /// x_k: current position of the system.
@@ -49,40 +43,38 @@ pub struct Kalman<T: Scalar + Ring, D: Dim + DimName, P>
 
     /// R_k: noise added to the observation
     obs_noise: MatrixN<T, D>,
-
-    _phase: PhantomData<P>,
 }
 
-impl <T: Scalar + Ring, D: Dim + DimName> Kalman<T, D, Predict>
+impl <T: Scalar + Real, D: Dim + DimName> Kalman<T, D>
     where DefaultAllocator: Allocator<T, D, D> + Allocator<T, D>
 {
-    pub fn new(initial_state: impl Into<VectorN<T, D>>,
-               initial_uncertainty: impl Into<MatrixN<T, D>>,
-               obs_map: impl Into<MatrixN<T, D>>,
-               obs_noise: impl Into<MatrixN<T, D>>,
-               noise: impl Into<MatrixN<T, D>>) -> Self
+    pub fn new(initial_state:           impl Into<VectorN<T, D>>,
+               initial_uncertainty:     impl Into<MatrixN<T, D>>,
+               obs_map:                 impl Into<MatrixN<T, D>>,
+               obs_noise:               impl Into<MatrixN<T, D>>,
+               noise:                   impl Into<MatrixN<T, D>>) -> Self
     {
-        let obs_map = obs_map.into();
         #[cfg(feature = "compact")] {
             Kalman {
                 state: initial_state.into(),
                 uncertainty: initial_uncertainty.into(),
                 environment_noise: noise.into(),
-                obs_map,
+                obs_map: obs_map.into(),
                 obs_noise: obs_noise.into(),
-                _phase: PhantomData,
             }
         }
 
         #[cfg(not(feature = "compact"))] {
+            let obs_map = obs_map.into();
+            let obs_transpose = obs_map.transpose();
+
             Kalman {
                 state: initial_state.into(),
                 uncertainty: initial_uncertainty.into(),
                 environment_noise: noise.into(),
                 obs_map,
-                obs_transpose: obs_map.transpose(),
+                obs_transpose,
                 obs_noise: obs_noise.into(),
-                _phase: PhantomData,
             }
         }
     }
@@ -95,35 +87,23 @@ impl <T: Scalar + Ring, D: Dim + DimName> Kalman<T, D, Predict>
         let transition = transition.into();
         let control = control.into();
 
-        let new_state = transition * self.state + control;
-        let new_uncertainty = transition * self.uncertainty * transition.transpose() + self.environment_noise;
+        let new_state = &transition * &self.state + control;
+        let new_uncertainty = &transition * &self.uncertainty * &transition.transpose() + &self.environment_noise;
 
         self.state = new_state;
         self.uncertainty = new_uncertainty;
     }
-}
 
-impl <T: Scalar + Ring, D: Dim + DimName> Kalman<T, D, Update>
-    where DefaultAllocator: Allocator<T, D, D> + Allocator<T, D>
-{
     pub fn update(&mut self, observation: impl Into<VectorN<T, D>>) {
         #[cfg(feature = "compact")]
-        let obs_transpose = self.obs_map.transpose();
+        let obs_transpose = &self.obs_map.transpose();
 
         #[cfg(not(feature = "compact"))]
-        let obs_transpose = self.obs_transpose;
+        let obs_transpose = &self.obs_transpose;
 
-        let kalman_gain = self.uncertainty * obs_transpose * na::try_inverse(&(self.obs_map * self.uncertainty * obs_transpose + self.obs_noise)).unwrap();
+        let kalman_gain = &self.uncertainty * obs_transpose * (&self.obs_map * &self.uncertainty * obs_transpose + &self.obs_noise).try_inverse().unwrap();
 
-        self.state = self.state + kalman_gain * (observation.into() - self.obs_map * self.state);
-        self.uncertainty = self.uncertainty - kalman_gain * self.obs_map * self.uncertainty;
+        self.state = &self.state + &kalman_gain * (observation.into() - &self.obs_map * &self.state);
+        self.uncertainty = &self.uncertainty - kalman_gain * &self.obs_map * &self.uncertainty;
     }
 }
-
-pub trait NextPhase {}
-
-pub struct Predict {}
-impl NextPhase for Predict {}
-
-pub struct Update {}
-impl NextPhase for Update {}
